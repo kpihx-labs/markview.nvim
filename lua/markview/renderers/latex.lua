@@ -29,6 +29,25 @@ latex.block = function (buffer, item)
 		return;
 	end
 
+	local ok, math_ffi = pcall(require, "markview.ffi.math");
+	if ok and math_ffi.init() then
+		local raw_latex = table.concat(item.text, "\n");
+		local rendered = math_ffi.to_unicode_block(raw_latex);
+		local rendered_lines = vim.split(rendered, "\n", {});
+		local virt_lines = {};
+		for _, r_line in ipairs(rendered_lines) do
+			table.insert(virt_lines, { { "  " .. r_line, "Special" } });
+		end
+		vim.api.nvim_buf_set_extmark(buffer, latex.ns, range.row_start, range.col_start, {
+			undo_restore = false, invalidate = true,
+			end_row = range.row_end,
+			end_col = range.col_end,
+			virt_lines = virt_lines,
+			virt_lines_above = true,
+			hl_mode = "combine",
+		});
+	end
+
 	vim.api.nvim_buf_set_extmark(buffer, latex.ns, range.row_start, range.col_start, {
 		undo_restore = false, invalidate = true,
 		end_col = range.col_start + #(item.marker or "$$"),
@@ -81,60 +100,9 @@ latex.command = function (buffer, item)
 
 	if not main_config then
 		return;
-	elseif symbols.entries[item.command.name or ""] then
-		--[[
-			FIX(#512): Allow `\<symbol>{}`
-
-			Some LaTeX previewers allow adding *empty groups* after symbols.
-			Add support for this symbol kind.
-
-			NOTE: `@markview.latex.symbols` doesn't handle `{}` groups, so it
-			must be handled here instead.
-
-			NOTE: See if performance is hampered due to this check
-		]]
-
-		local arg = item.args[1] or { range = {}, text = "" };
-
-		---@type markview.config.latex.commands.opts
-		config = {
-			on_command = {
-				conceal = "",
-				virt_text_pos = "inline",
-
-				virt_text = {
-					{ symbols.entries[item.command.name or ""] },
-				},
-
-				hl_mode = "combine",
-			},
-
-			on_args = {
-				{
-					on_before = {
-						end_col = arg.range[2] + 1,
-						conceal = "",
-
-						virt_text_pos = "inline",
-						virt_text = {
-							{ " " },
-						},
-
-						hl_mode = "combine"
-					},
-					after_offset = function (range)
-						return { range[1], range[2], range[3], range[4] - 1 };
-					end,
-					on_after = {
-						end_col = arg.range[4],
-						conceal = "",
-					},
-				}
-			}
-		};
 	else
 		---@type markview.config.latex.commands.opts
-		config = utils.match(main_config, command_name, { default = false, eval_args = { buffer, item } });
+		config = utils.match(main_config, command_name, { default = false });
 
 		if type(config) ~= "table" or vim.tbl_isempty(config) == true then
 			return;
