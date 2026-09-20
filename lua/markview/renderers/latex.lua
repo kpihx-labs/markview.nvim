@@ -867,7 +867,6 @@ end
 ---@param buffer integer
 ---@param content markview.parsed.latex[]
 latex.render = function (buffer, content)
-	--- Clean up previous caches.
 	latex.cache = {
 		font_regions = {},
 		style_regions = {
@@ -875,6 +874,85 @@ latex.render = function (buffer, content)
 			subscripts = {}
 		},
 	};
+
+	local ok_ffi, math_ffi = pcall(require, "markview.ffi.math");
+	if ok_ffi and math_ffi.init() then
+		local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false);
+		local in_block = false;
+		local b_start = 0;
+		local b_lines = {};
+		local b_delim = "";
+
+		for l_idx, line in ipairs(lines) do
+			local r = l_idx - 1;
+			local trimmed = vim.trim(line);
+
+			if not in_block then
+				if trimmed:sub(1, 2) == "$$" or trimmed:sub(1, 2) == "\\[" then
+					b_delim = trimmed:sub(1, 2);
+					local closer = b_delim == "$$" and "$$" or "\\]";
+					if #trimmed > 2 and trimmed:sub(-#closer) == closer then
+						local raw = trimmed:sub(3, -#closer - 1);
+						local rendered = math_ffi.to_unicode_block(raw);
+						local r_lines = vim.split(rendered, "\n", {});
+						local virt = {};
+						for _, rl in ipairs(r_lines) do
+							table.insert(virt, { { "  " .. rl, "Special" } });
+						end
+						vim.api.nvim_buf_set_extmark(buffer, latex.ns, r, 0, {
+							virt_lines = virt,
+							virt_lines_above = true,
+							hl_mode = "combine",
+						});
+					else
+						in_block = true;
+						b_start = r;
+						b_lines = { trimmed:sub(3) };
+					end
+				else
+					-- Inline math: $...$ and \(...\)
+					local s_col = 1;
+					while true do
+						local s, e = line:find("%$[^%$]+%$", s_col);
+						if not s then break; end
+						local raw = line:sub(s + 1, e - 1);
+						local rendered = math_ffi.to_unicode(raw);
+						pcall(vim.api.nvim_buf_set_extmark, buffer, latex.ns, r, s - 1, {
+							end_row = r,
+							end_col = e,
+							conceal = "",
+							virt_text = { { rendered, "Special" } },
+							virt_text_pos = "inline",
+							hl_mode = "combine",
+						});
+						s_col = e + 1;
+					end
+				end
+			else
+				local closer = b_delim == "$$" and "$$" or "\\]";
+				if trimmed == closer or trimmed:sub(-#closer) == closer then
+					in_block = false;
+					if trimmed ~= closer then
+						table.insert(b_lines, trimmed:sub(1, -#closer - 1));
+					end
+					local raw = table.concat(b_lines, "\n");
+					local rendered = math_ffi.to_unicode_block(raw);
+					local r_lines = vim.split(rendered, "\n", {});
+					local virt = {};
+					for _, rl in ipairs(r_lines) do
+						table.insert(virt, { { "  " .. rl, "Special" } });
+					end
+					vim.api.nvim_buf_set_extmark(buffer, latex.ns, b_start, 0, {
+						virt_lines = virt,
+						virt_lines_above = true,
+						hl_mode = "combine",
+					});
+				else
+					table.insert(b_lines, line);
+				end
+			end
+		end
+	end
 
 	local custom = spec.get({ "renderers" }, { fallback = {} });
 	local post = {};
