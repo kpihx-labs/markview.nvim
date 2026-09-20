@@ -897,7 +897,7 @@ latex.render = function (buffer, content)
 						local r_lines = vim.split(rendered, "\n", {});
 						local virt = {};
 						for _, rl in ipairs(r_lines) do
-							table.insert(virt, { { "  " .. rl, "Special" } });
+							table.insert(virt, { { rl, "Special" } });
 						end
 						vim.api.nvim_buf_set_extmark(buffer, latex.ns, r, 0, {
 							virt_lines = virt,
@@ -940,7 +940,7 @@ latex.render = function (buffer, content)
 					local r_lines = vim.split(rendered, "\n", {});
 					local virt = {};
 					for _, rl in ipairs(r_lines) do
-						table.insert(virt, { { "  " .. rl, "Special" } });
+						table.insert(virt, { { rl, "Special" } });
 					end
 					vim.api.nvim_buf_set_extmark(buffer, latex.ns, b_start, 0, {
 						virt_lines = virt,
