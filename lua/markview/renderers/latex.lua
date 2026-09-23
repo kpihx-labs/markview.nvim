@@ -29,6 +29,7 @@ latex.block = function (buffer, item)
 		return;
 	end
 
+	-- Prefer Rust FFI Unicode render: conceal the whole source block, show Unicode only.
 	local ok, math_ffi = pcall(require, "markview.ffi.math");
 	if ok and math_ffi.init() then
 		local raw_latex = table.concat(item.text, "\n");
@@ -38,14 +39,42 @@ latex.block = function (buffer, item)
 		for _, r_line in ipairs(rendered_lines) do
 			table.insert(virt_lines, { { "  " .. r_line, "Special" } });
 		end
-		vim.api.nvim_buf_set_extmark(buffer, latex.ns, range.row_start, range.col_start, {
-			undo_restore = false, invalidate = true,
-			end_row = range.row_end,
-			end_col = range.col_end,
-			virt_lines = virt_lines,
-			virt_lines_above = true,
-			hl_mode = "combine",
-		});
+		-- virt_lines must not share the concealed lines (nvim does not draw them there).
+		if range.row_start > 0 then
+			vim.api.nvim_buf_set_extmark(buffer, latex.ns, range.row_start - 1, 0, {
+				undo_restore = false, invalidate = true,
+				virt_lines = virt_lines,
+				virt_lines_above = false,
+				hl_mode = "combine",
+			});
+			vim.api.nvim_buf_set_extmark(buffer, latex.ns, range.row_start, 0, {
+				undo_restore = false, invalidate = true,
+				end_row = range.row_end,
+				end_col = 0,
+				conceal_lines = "",
+			});
+		else
+			local first = table.remove(virt_lines, 1);
+			vim.api.nvim_buf_set_extmark(buffer, latex.ns, 0, 0, {
+				undo_restore = false, invalidate = true,
+				end_col = #(item.text[1] or ""),
+				conceal = "",
+				virt_text = first,
+				virt_text_pos = "overlay",
+				virt_lines = #virt_lines > 0 and virt_lines or nil,
+				virt_lines_above = false,
+				hl_mode = "combine",
+			});
+			if range.row_end > 0 then
+				vim.api.nvim_buf_set_extmark(buffer, latex.ns, 1, 0, {
+					undo_restore = false, invalidate = true,
+					end_row = range.row_end,
+					end_col = 0,
+					conceal_lines = "",
+				});
+			end
+		end
+		return;
 	end
 
 	vim.api.nvim_buf_set_extmark(buffer, latex.ns, range.row_start, range.col_start, {
@@ -875,6 +904,23 @@ latex.render = function (buffer, content)
 		},
 	};
 
+	--- Ranges covered by Rust FFI Unicode render (row_start, col_start, row_end, col_end).
+	---@type integer[][]
+	local ffi_spans = {};
+
+	---@param range { row_start: integer, col_start: integer, row_end: integer, col_end: integer }
+	---@return boolean
+	local function ffi_covers(range)
+		for _, s in ipairs(ffi_spans) do
+			if range.row_start >= s[1] and range.row_end <= s[3]
+				and (range.row_start > s[1] or range.col_start >= s[2])
+				and (range.row_end < s[3] or range.col_end <= s[4]) then
+				return true;
+			end
+		end
+		return false;
+	end
+
 	local ok_ffi, math_ffi = pcall(require, "markview.ffi.math");
 	if ok_ffi and math_ffi.init() then
 		local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false);
@@ -882,6 +928,74 @@ latex.render = function (buffer, content)
 		local b_start = 0;
 		local b_lines = {};
 		local b_delim = "";
+
+		---@param row_start integer
+		---@param row_end integer
+		---@param rendered string
+		local function place_block_unicode(row_start, row_end, rendered)
+			local r_lines = vim.split(rendered, "\n", {});
+			local virt = {};
+			for _, rl in ipairs(r_lines) do
+				table.insert(virt, { { rl, "Special" } });
+			end
+			-- virt_lines on a concealed line are not drawn — anchor Unicode on the
+			-- previous visible line (below it), then conceal the whole math block.
+			if row_start > 0 then
+				vim.api.nvim_buf_set_extmark(buffer, latex.ns, row_start - 1, 0, {
+					undo_restore = false, invalidate = true,
+					virt_lines = virt,
+					virt_lines_above = false,
+					hl_mode = "combine",
+				});
+				vim.api.nvim_buf_set_extmark(buffer, latex.ns, row_start, 0, {
+					undo_restore = false, invalidate = true,
+					end_row = row_end,
+					end_col = 0,
+					conceal_lines = "",
+				});
+			else
+				-- Block at buffer top: keep first source line as virt_text anchor,
+				-- conceal the rest of the block lines.
+				local first = table.remove(virt, 1);
+				vim.api.nvim_buf_set_extmark(buffer, latex.ns, 0, 0, {
+					undo_restore = false, invalidate = true,
+					end_row = 0,
+					end_col = #lines[1],
+					conceal = "",
+					virt_text = first,
+					virt_text_pos = "overlay",
+					virt_lines = #virt > 0 and virt or nil,
+					virt_lines_above = false,
+					hl_mode = "combine",
+				});
+				if row_end > 0 then
+					vim.api.nvim_buf_set_extmark(buffer, latex.ns, 1, 0, {
+						undo_restore = false, invalidate = true,
+						end_row = row_end,
+						end_col = 0,
+						conceal_lines = "",
+					});
+				end
+			end
+			table.insert(ffi_spans, { row_start, 0, row_end, math.huge });
+		end
+
+		---@param row integer
+		---@param col_start integer
+		---@param col_end integer
+		---@param rendered string
+		local function place_inline_unicode(row, col_start, col_end, rendered)
+			pcall(vim.api.nvim_buf_set_extmark, buffer, latex.ns, row, col_start, {
+				undo_restore = false, invalidate = true,
+				end_row = row,
+				end_col = col_end,
+				conceal = "",
+				virt_text = { { rendered, "Special" } },
+				virt_text_pos = "inline",
+				hl_mode = "combine",
+			});
+			table.insert(ffi_spans, { row, col_start, row, col_end });
+		end
 
 		for l_idx, line in ipairs(lines) do
 			local r = l_idx - 1;
@@ -893,17 +1007,7 @@ latex.render = function (buffer, content)
 					local closer = b_delim == "$$" and "$$" or "\\]";
 					if #trimmed > 2 and trimmed:sub(-#closer) == closer then
 						local raw = trimmed:sub(3, -#closer - 1);
-						local rendered = math_ffi.to_unicode_block(raw);
-						local r_lines = vim.split(rendered, "\n", {});
-						local virt = {};
-						for _, rl in ipairs(r_lines) do
-							table.insert(virt, { { rl, "Special" } });
-						end
-						vim.api.nvim_buf_set_extmark(buffer, latex.ns, r, 0, {
-							virt_lines = virt,
-							virt_lines_above = true,
-							hl_mode = "combine",
-						});
+						place_block_unicode(r, r, math_ffi.to_unicode_block(raw));
 					else
 						in_block = true;
 						b_start = r;
@@ -916,15 +1020,15 @@ latex.render = function (buffer, content)
 						local s, e = line:find("%$[^%$]+%$", s_col);
 						if not s then break; end
 						local raw = line:sub(s + 1, e - 1);
-						local rendered = math_ffi.to_unicode(raw);
-						pcall(vim.api.nvim_buf_set_extmark, buffer, latex.ns, r, s - 1, {
-							end_row = r,
-							end_col = e,
-							conceal = "",
-							virt_text = { { rendered, "Special" } },
-							virt_text_pos = "inline",
-							hl_mode = "combine",
-						});
+						place_inline_unicode(r, s - 1, e, math_ffi.to_unicode(raw));
+						s_col = e + 1;
+					end
+					s_col = 1;
+					while true do
+						local s, e = line:find("\\%(.-\\%)", s_col);
+						if not s then break; end
+						local raw = line:sub(s + 2, e - 2);
+						place_inline_unicode(r, s - 1, e, math_ffi.to_unicode(raw));
 						s_col = e + 1;
 					end
 				end
@@ -936,17 +1040,7 @@ latex.render = function (buffer, content)
 						table.insert(b_lines, trimmed:sub(1, -#closer - 1));
 					end
 					local raw = table.concat(b_lines, "\n");
-					local rendered = math_ffi.to_unicode_block(raw);
-					local r_lines = vim.split(rendered, "\n", {});
-					local virt = {};
-					for _, rl in ipairs(r_lines) do
-						table.insert(virt, { { rl, "Special" } });
-					end
-					vim.api.nvim_buf_set_extmark(buffer, latex.ns, b_start, 0, {
-						virt_lines = virt,
-						virt_lines_above = true,
-						hl_mode = "combine",
-					});
+					place_block_unicode(b_start, r, math_ffi.to_unicode_block(raw));
 				else
 					table.insert(b_lines, line);
 				end
@@ -958,6 +1052,11 @@ latex.render = function (buffer, content)
 	local post = {};
 
 	for _, item in ipairs(content or {}) do
+		-- Skip native latex renderers for spans already replaced by FFI Unicode.
+		if item.range and ffi_covers(item.range) then
+			goto continue;
+		end
+
 		if vim.list_contains({ "latex_word", "latex_symbol" }, item.class) == true then
 			table.insert(post, item);
 		else
@@ -982,9 +1081,14 @@ latex.render = function (buffer, content)
 				});
 			end
 		end
+		::continue::
 	end
 
 	for _, item in ipairs(post) do
+		if item.range and ffi_covers(item.range) then
+			goto continue_post;
+		end
+
 		local success, err;
 
 		if custom[item.class] then
@@ -1005,6 +1109,7 @@ latex.render = function (buffer, content)
 				}
 			});
 		end
+		::continue_post::
 	end
 end
 
